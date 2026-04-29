@@ -1,0 +1,120 @@
+name: 🎬 YouTube Job Alert Generator
+
+on:
+  # ── Scheduled runs: 9 AM and 6 PM IST (3:30 AM and 12:30 PM UTC) ──
+  schedule:
+    - cron: "30 3 * * *"    # 9:00 AM IST
+    - cron: "30 12 * * *"   # 6:00 PM IST
+
+  # ── Manual trigger (for testing) ──
+  workflow_dispatch:
+    inputs:
+      max_videos:
+        description: "Max videos to generate (1–4)"
+        required: false
+        default: "2"
+        type: choice
+        options: ["1", "2", "3", "4"]
+      upload_enabled:
+        description: "Upload to YouTube?"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  generate-and-upload:
+    name: 🎬 Generate & Upload Videos
+    runs-on: ubuntu-latest
+    timeout-minutes: 20   # Safety cap per run
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python Setup ───────────────────────────────────────────────────
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. System Dependencies (FFmpeg + fonts) ───────────────────────────
+      - name: 📦 Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            fonts-liberation \
+            fonts-dejavu-core \
+            libfontconfig1 \
+            2>/dev/null
+          echo "FFmpeg version: $(ffmpeg -version 2>&1 | head -1)"
+
+      # ── 4. Python Dependencies ────────────────────────────────────────────
+      - name: 📦 Install Python dependencies
+        run: |
+          pip install --upgrade pip --quiet
+          pip install -r requirements.txt --quiet
+
+      # ── 5. Restore Data Cache (processed jobs + image cache) ──────────────
+      - name: 💾 Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/
+            cache/
+          key: job-data-${{ runner.os }}-${{ github.run_number }}
+          restore-keys: |
+            job-data-${{ runner.os }}-
+
+      # ── 6. Write Secrets to Files ─────────────────────────────────────────
+      - name: 🔑 Set up YouTube credentials
+        env:
+          YOUTUBE_TOKEN_JSON_B64: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+        run: |
+          # token.json is stored as a base64-encoded GitHub Secret
+          if [ -n "$YOUTUBE_TOKEN_JSON_B64" ]; then
+            echo "$YOUTUBE_TOKEN_JSON_B64" | base64 -d > token.json
+            echo "✅ YouTube token loaded from secrets"
+          else
+            echo "⚠️  YOUTUBE_TOKEN_JSON not set — upload will be skipped"
+          fi
+
+      # ── 7. Run the Pipeline ───────────────────────────────────────────────
+      - name: 🚀 Run video generation pipeline
+        env:
+          PIXABAY_API_KEY:          ${{ secrets.PIXABAY_API_KEY }}
+          YOUTUBE_UPLOAD_ENABLED:   ${{ github.event.inputs.upload_enabled || 'true' }}
+          MAX_VIDEOS_PER_RUN:       ${{ github.event.inputs.max_videos || '4' }}
+          LOG_LEVEL:                INFO
+        run: |
+          python main.py
+
+      # ── 8. Upload Video Artifacts (for debugging) ─────────────────────────
+      - name: 📤 Upload generated videos as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-videos-${{ github.run_number }}
+          path: output/
+          retention-days: 3   # Keep for 3 days only
+          if-no-files-found: ignore
+
+      # ── 9. Save Updated Data Cache ────────────────────────────────────────
+      - name: 💾 Save data cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/
+            cache/
+          key: job-data-${{ runner.os }}-${{ github.run_number }}
+
+      # ── 10. Cleanup (free disk space) ─────────────────────────────────────
+      - name: 🧹 Cleanup output directory
+        if: always()
+        run: |
+          rm -rf output/
+          echo "Output directory cleaned."
